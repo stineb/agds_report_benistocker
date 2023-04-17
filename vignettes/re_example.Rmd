@@ -1,0 +1,196 @@
+---
+title: 'Report Exercise (example): Patterns in data quality'
+author: "Beni Stocker"
+date: "2023-04-17"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Aim and problem
+
+(This is *not* a Report Exercise of [AGDS I](https://geco-bern.github.io/agds/), but serves as a demo for what a Report Exercise should look like.)
+
+Data may be missing at random, or following a certain pattern. In the latter case, decisions taken during data cleaning steps may be critical and may introduce unwanted bias in your results. This Report Exercise uses ecoystem flux data to demonstrate implications of non-random missingness. 
+
+**The problem was specified as follows:**
+
+*The uncleaned dataset `FLX_CH-Lae_FLUXNET2015_FULLSET_HH_2004-2006.csv` holds half-hourly data that is sometimes of poor quality. Investigate whether NEE data quality is randomly spread across hours in a day by calculating the proportion of (i) actually measured data, (ii) good quality gap-filled data, (iii) medium quality data, and (iv) poor quality data within each hour-of-day (24 hours per day).*
+
+## Load packages
+
+```{r message = FALSE}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+```
+
+## Read data
+
+Ecosystem gross primary productivity data and accompanying quality control information is used here. The data is from one site (CH-Lae).
+
+```{r message = FALSE}
+# read half hourly fluxes
+half_hourly_fluxes <- readr::read_csv(
+  paste0(here::here(), "/data/FLX_CH-Lae_FLUXNET2015_FULLSET_HH_2004-2006.csv")
+  ) 
+
+# Select only variables that we are interested in
+half_hourly_fluxes <- half_hourly_fluxes |>
+  dplyr::select(
+    starts_with("TIMESTAMP"),
+    ends_with("_F"),
+    GPP_NT_VUT_REF,
+    NEE_VUT_REF_QC,
+    -starts_with("SWC_F_MDS_"),
+    -contains("JSB")
+  )
+```
+
+> Data visualisations shown below are not asked for explicitly. However, it is advisable to visualise your data before wrangling to get an understanding and intuition of your data. You won't fail if you don't do that, but if you do, it will be judged favourably.
+
+There is no missing value in the dataset.
+
+```{r message = FALSE}
+visdat::vis_miss(half_hourly_fluxes)
+```
+
+The data are in the form of a time series of half-hourly values, covering three years (2004-2006). Here is "slice" of the data, showing time series of all available variables (except quality control) for a few weeks in summer 2004.
+
+```{r message = FALSE}
+half_hourly_fluxes |> 
+  slice(10000:12000) |>  
+  dplyr::mutate(
+    date_time = lubridate::ymd_hm(TIMESTAMP_START)) |> 
+  pivot_longer(3:10, names_to = "var", values_to = "value") |> 
+  ggplot(aes(date_time, value)) +
+  geom_line() +
+  facet_wrap(~var, ncol = 2, scales = "free_y")
+```
+
+## Aggregate
+
+Aggregate data from half-hourly to daily values, calculating summary statistics:
+
+- The sum of measured, good quality, medium quality, poor quality, and total half-hourly data points per day
+- The fraction of data points in each quality class per day
+
+```{r message=FALSE, warning=FALSE}
+daily_fluxes <- half_hourly_fluxes |>
+  mutate(TIMESTAMP_START = lubridate::ymd_hm(TIMESTAMP_START)) |> 
+  mutate(hour_of_day = lubridate::hour(TIMESTAMP_START)) |> 
+  group_by(hour_of_day) |> 
+  summarise(n_measured = sum(NEE_VUT_REF_QC == 0),
+            n_good     = sum(NEE_VUT_REF_QC == 1),
+            n_medium   = sum(NEE_VUT_REF_QC == 2),
+            n_poor     = sum(NEE_VUT_REF_QC == 3),
+            n_total    = n()
+            ) |> 
+  mutate(f_measured = n_measured / n_total,
+         f_good     = n_good     / n_total,
+         f_medium   = n_medium   / n_total,
+         f_poor     = n_poor     / n_total,
+         )
+```
+
+
+**Problem:**
+
+*Interpret your findings: Are the proportions evenly spread across hours in a day?*
+
+The figure below shows that the average fraction of of acutally measured data has a clear diurnal pattern: It is highest during midday and lowest during the night. 
+
+```{r}
+daily_fluxes |> 
+  pivot_longer(c(f_measured, f_good, f_medium, f_poor), 
+               names_to = "quality", 
+               values_to = "fraction") |> 
+  ggplot(aes(x = hour_of_day, 
+             y = fraction * 100,     # *100 to get percentages 
+             color = quality)) +
+  geom_line(linewidth = 1.5) +       # make lines bit bigger
+  theme_classic() +                  # Pick a nice theme
+  khroma::scale_color_okabeito() +
+  labs(
+    title = "Diurnal pattern of GPP quality",
+    y     = "Fraction of total GPP entries [%]",
+    x     = "Hour of Day"
+  )
+```
+
+**Problem:**
+
+*Perform an aggregation of the half-hourly GPP data (variable `GPP_NT_VUT_REF`) to daily means of the unmodified data read from file `FLX_CH-Lae_FLUXNET2015_FULLSET_HH_2004-2006.csv`, and from cleaned data where only measured (not gap-filled) half-hourly data is kept and aggregated. This yields two data frames with daily GPP data. Calculate the overall mean GPP for the two data frames (across all days in the data frame). Are the overall mean GPP values equal? If not, why?*
+
+First, aggregate to daily means of the unmodified data. This yields a data frame `daily_fluxes_all`.
+```{r message=FALSE, warning=FALSE}
+daily_fluxes_all <- half_hourly_fluxes |>
+  dplyr::mutate(
+    date_time = lubridate::ymd_hm(TIMESTAMP_START),
+    date = lubridate::date(date_time)
+  ) |>
+  dplyr::group_by(date) |> 
+  dplyr::summarise(
+    GPP_NT_VUT_REF = mean(GPP_NT_VUT_REF, na.rm = TRUE)
+  )
+```
+
+Second, aggregate to daily means from cleaned data where only measured (not gap-filled) half-hourly data is kept. This yields a data frame `daily_fluxes_cleaned`.
+```{r}
+daily_fluxes_cleaned <- half_hourly_fluxes |>
+  dplyr::mutate(
+    date_time = lubridate::ymd_hm(TIMESTAMP_START),
+    date = lubridate::date(date_time)
+  ) |>
+  dplyr::mutate(
+    GPP_NT_VUT_REF = ifelse(NEE_VUT_REF_QC == 0, GPP_NT_VUT_REF, NA)
+    ) |> 
+  dplyr::group_by(date) |> 
+  dplyr::summarise(
+    GPP_NT_VUT_REF = mean(GPP_NT_VUT_REF, na.rm = TRUE)
+  )
+```
+
+The mean across days of the *uncleaned* data is: 
+```{r}
+daily_fluxes_all |> 
+  summarise(
+    GPP_NT_VUT_REF = mean(GPP_NT_VUT_REF, na.rm = TRUE)
+  ) |> 
+  pull(GPP_NT_VUT_REF)
+```
+
+The mean across days of the *cleaned* data is:
+```{r}
+daily_fluxes_cleaned |> 
+  summarise(
+    GPP_NT_VUT_REF = mean(GPP_NT_VUT_REF, na.rm = TRUE)
+  ) |> 
+  pull(GPP_NT_VUT_REF)
+```
+
+The clear difference arises because poor-quality data tends is predominantly obtained during the night - when GPP is systematically lower than during the night. In fact, GPP is zero when solar radiation is zero.
+```{r}
+half_hourly_fluxes |> 
+  mutate(is_night = ifelse(SW_IN_F == 0, TRUE, FALSE)) |> 
+  ggplot(aes(is_night, GPP_NT_VUT_REF)) +
+  geom_boxplot(fill = "grey70", outlier.shape = NA) +
+  theme_classic() +
+  geom_hline(yintercept = 0, linetype = "dotted")
+```
+
+Hence, when nighttime values are removed often than daytime values are removed, remaining values predominantly represent daytime values and are thus, on average, systematically higher than values that are removed.
+
+The difference in valuses retained and removed are shown below.
+
+```{r}
+half_hourly_fluxes |> 
+  mutate(is_measured = ifelse(NEE_VUT_REF_QC == 0, TRUE, FALSE)) |> 
+  mutate(is_measured = factor(is_measured, levels = c(TRUE, FALSE))) |>  # reordering factors
+  ggplot(aes(is_measured, GPP_NT_VUT_REF)) +
+  geom_boxplot(fill = "grey70", outlier.shape = NA) +
+  theme_classic() +
+  geom_hline(yintercept = 0, linetype = "dotted")
+```
